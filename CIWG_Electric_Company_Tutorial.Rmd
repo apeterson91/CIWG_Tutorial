@@ -1,0 +1,183 @@
+---
+title: "Causal Inference Working Group: Electric Company Case Study"
+author: "Adam Peterson"
+date: "9/16/2020"
+output: html_document
+---
+
+
+# Libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r,results='hide',message=FALSE}
+library(tidyverse)
+library(equatiomatic)
+library(rstanarm)
+theme_set(theme_bw() + theme(strip.background=element_blank()))
+```
+
+
+# Data
+
+
+```{r data,message=FALSE,warning=FALSE}
+df <- read_csv("https://raw.githubusercontent.com/avehtari/ROS-Examples/master/ElectricCompany/data/electric.csv") %>% 
+  mutate(treatment=factor(treatment,labels=c("Control","Treatment")),
+         grade = factor(grade)) %>% select(-X1)
+knitr::kable(head(df))
+```
+
+* `post_test`: Outcome variable, the post treatment reading test score
+* `pre_test` : Possible covariate, test taken prior to treatment
+* `grade` : Classroom's grade level
+* `treatment` : Binary indicator variable where 1 denotes the classroom watched the tv show and 0 indicates they did not.
+* `supp` : Whether or not the class received supplemental treatment, **NOTE**: only available for 96 classes.
+* `pair_id` : Denotes which class' are in which pairs
+
+
+
+## Checking for Imbalance, Overlap
+
+```{r EDA, echo=FALSE,message=FALSE}
+df %>% 
+  group_by(grade,treatment) %>% 
+  mutate(mean_ptest = mean(post_test)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x=post_test)) + 
+  geom_histogram() + 
+  geom_vline(aes(xintercept=mean_ptest),color='red',linetype=2) + 
+  facet_wrap(treatment~grade,ncol=4)
+```
+
+### Model Estimating Treatment-Grade Main and Interaction Effects
+
+
+```{r model_one_eq,echo=F,results='asis'}
+fit_lm <- lm(post_test ~ treatment*grade,
+                data=df)
+extract_eq(fit_lm,wrap=TRUE)
+```
+
+```{r model_fit_one,message=FALSE,results='hide'}
+fit <- stan_glm(post_test ~ treatment*grade,
+                data=df,
+                prior_intercept=NULL,prior=NULL)
+```
+
+
+
+```{r fit_print}
+fit
+```
+
+
+```{r plot_data,message=FALSE,results='hide',echo=F}
+tx_effs <- as.matrix(fit,regex_pars = "Treatment")
+tx_effs <- purrr::map_dfr(1:4,function(x) tibble(Grade = x,
+                                                 Treatment_Effect = if(x==1) tx_effs[,1] else tx_effs[,1] + tx_effs[,x]))
+tx_effs <- tx_effs %>% group_by(Grade) %>% 
+  summarise(Lower= quantile(Treatment_Effect,0.025),
+            lower = quantile(Treatment_Effect,0.25),
+            Median = quantile(Treatment_Effect,0.5),
+            upper = quantile(Treatment_Effect,0.75),
+            Upper = quantile(Treatment_Effect,0.975)) %>% 
+  mutate(Grade = factor(Grade))
+```
+
+```{r plot_results_one,echo=F}
+tx_effs %>% 
+  ggplot(aes(x=forcats::fct_rev(Grade),y=Median)) + 
+  geom_pointrange(aes(ymin=Lower,ymax=Upper),linetype=2) + 
+  geom_pointrange(aes(ymin=lower,ymax=upper),linetype=1) + 
+  coord_flip() + xlab("Grade") + ylab("") + ggtitle("Treatment Effect") +
+  geom_hline(aes(yintercept=0),linetype=3,color='red')
+```
+
+
+
+## Pre Treatment Predictors
+
+Would including the `pre_test` covariate in the model help?
+
+```{r pre_treatment_plot,message=FALSE,echo=F}
+ggplot(aes(x=pre_test,y=post_test,color=treatment),data=df) +
+  geom_point(aes(shape=treatment)) + 
+  geom_smooth(method='lm',se = FALSE,) + 
+  facet_wrap(~grade) + 
+  scale_color_manual(values=c("black","darkgrey")) + 
+  ggtitle("Grade Specific Electric Company Treatment/Control Effects on Reading Test")
+```
+
+
+### Model with Pre-Test Included
+
+```{r model_two_eq,echo=F,results='asis'}
+fit_lm <- lm(post_test ~ treatment*grade + pre_test*grade, 
+                data=df)
+extract_eq(fit_lm,wrap=TRUE) 
+```
+
+```{r pretreatment_model,message=FALSE,results='hide'}
+fit <- stan_glm(post_test ~ treatment*grade + pre_test*grade,
+                data=df,
+                prior_intercept=NULL,prior=NULL)
+```
+
+```{r pretreat_print}
+fit
+```
+
+
+```{r plot_data_manipulate2,echo=F,message=F}
+ptx_effs <- as.matrix(fit,regex_pars = "Treatment")
+ptx_effs <- purrr::map_dfr(1:4,function(x) tibble(Grade = x,
+                                                 Treatment_Effect = if(x==1) ptx_effs[,1] else ptx_effs[,1] + ptx_effs[,x]))
+ptx_effs <- ptx_effs %>% group_by(Grade) %>% 
+  summarise(Lower= quantile(Treatment_Effect,0.025),
+            lower = quantile(Treatment_Effect,0.25),
+            Median = quantile(Treatment_Effect,0.5),
+            upper = quantile(Treatment_Effect,0.75),
+            Upper = quantile(Treatment_Effect,0.975)) %>% 
+  ungroup() %>% 
+  mutate(Grade = factor(Grade),
+         Model = "Adjusted")
+```
+
+
+```{r plot_mod_results2,echo=F}
+pltdf <- rbind(tx_effs %>% mutate(Model = "Unadjusted"),
+               ptx_effs) %>% 
+  mutate(Model = factor(Model,levels = c("Unadjusted","Adjusted")))
+
+pltdf %>% 
+  ggplot(aes(x=forcats::fct_rev(Grade),y=Median)) + 
+  geom_pointrange(aes(ymin=Lower,ymax=Upper),linetype=2) + 
+  geom_pointrange(aes(ymin=lower,ymax=upper),linetype=1) + 
+  coord_flip() + xlab("Grade") + ylab("") + 
+  geom_hline(aes(yintercept=0),linetype=3,color='red') +
+  facet_wrap(~Model)
+```
+
+**NOTE** 
+We could also run this analysis by stratifying by grade:  
+
+1. How would you fit those models? 
+2. How would you plot the output? 
+3. Do the estimates change?
+4. Does the precision in estimation change?
+
+## Model Stratification
+
+
+```{r stratified_model_fit}
+## Insert code here to run stratified model fit
+
+```
+
+
+```{r strata_plot}
+## Insert code here to plot new model fits
+
+```
